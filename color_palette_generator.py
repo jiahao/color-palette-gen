@@ -304,8 +304,81 @@ def get_ncs_name(rgb):
 
 
 def get_pantone_name(rgb):
-    """Pantone mapping removed — return placeholder."""
-    return "Pantone N/A"
+    """Return nearest Pantone name using pycolorname, fallback to placeholder.
+
+    Uses the Pantone datasets included with `pycolorname`. If the package
+    or data is unavailable, returns a neutral placeholder.
+    """
+    try:
+        import numpy as _np
+        if not hasattr(_np, 'asscalar'):
+            # Provide compatibility for older libraries expecting numpy.asscalar
+            _np.asscalar = lambda x: x.item() if hasattr(x, 'item') else x
+        from pycolorname.pantone.pantonepaint import PantonePaint
+        pp = PantonePaint()
+        name, _ = pp.find_closest(tuple(int(c) for c in rgb))
+        return name
+    except Exception:
+        return "Pantone N/A"
+
+
+def get_ral_classic_name(rgb):
+    """Return nearest RAL Classic name using pycolorname, fallback to placeholder."""
+    try:
+        import numpy as _np
+        if not hasattr(_np, 'asscalar'):
+            _np.asscalar = lambda x: x.item() if hasattr(x, 'item') else x
+        from pycolorname.ral.classic.ralcolor import RALColor
+        rc = RALColor()
+        name, _ = rc.find_closest(tuple(int(c) for c in rgb))
+        return name
+    except Exception:
+        return "RAL Classic N/A"
+
+
+def get_all_names(rgb):
+    """Return a dict with names from all available naming systems.
+
+    Includes: HTML nearest name, ISCC-NBS (`get_color_name`), NCS (`get_ncs_name`),
+    Pantone (`get_pantone_name`), and RAL Classic (`get_ral_classic_name`).
+    """
+    rgb_arr = np.array(rgb, dtype=int)
+    names = {}
+    # HTML nearest (by exact match if present)
+    hex_code = f"#{rgb_arr[0]:02X}{rgb_arr[1]:02X}{rgb_arr[2]:02X}"
+    # Find exact HTML color match if any
+    html_match = None
+    for name, val in HTML_COLORS.items():
+        if tuple(val) == tuple(rgb_arr.tolist()):
+            html_match = name
+            break
+    names['HTML'] = html_match or hex_code
+
+    # ISCC-NBS name
+    try:
+        names['ISCC-NBS'] = get_color_name(rgb_arr)
+    except Exception:
+        names['ISCC-NBS'] = 'N/A'
+
+    # NCS
+    try:
+        names['NCS'] = get_ncs_name(rgb_arr)
+    except Exception:
+        names['NCS'] = 'N/A'
+
+    # Pantone
+    try:
+        names['Pantone'] = get_pantone_name(rgb_arr)
+    except Exception:
+        names['Pantone'] = 'Pantone N/A'
+
+    # RAL Classic
+    try:
+        names['RAL Classic'] = get_ral_classic_name(rgb_arr)
+    except Exception:
+        names['RAL Classic'] = 'RAL Classic N/A'
+
+    return names
 
 
 def get_color_name(rgb):
