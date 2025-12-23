@@ -239,6 +239,75 @@ HTML_COLORS = {
 }
 
 
+def get_ncs_name(rgb):
+    """Generate NCS (Natural Color System) color name."""
+    r, g, b = rgb / 255.0
+
+    # Convert to HSL
+    max_val = max(r, g, b)
+    min_val = min(r, g, b)
+    l = (max_val + min_val) / 2
+
+    # For very dark colors, hue is unreliable
+    if l < 0.15:
+        if l < 0.05:
+            return "NCS 9000 Black"
+        else:
+            return "NCS 8000 Very Dark Gray"
+
+    if max_val == min_val:
+        h_deg = 0
+        s = 0
+    else:
+        d = max_val - min_val
+        s = d / (2 - max_val - min_val) if l > 0.5 else d / (max_val + min_val)
+        if max_val == r:
+            h_deg = ((g - b) / d + (6 if g < b else 0)) * 60
+        elif max_val == g:
+            h_deg = ((b - r) / d + 2) * 60
+        else:
+            h_deg = ((r - g) / d + 4) * 60
+
+    if s < 0.05:
+        if l < 0.5:
+            return "NCS 5000 Dark Gray"
+        else:
+            return "NCS 2000 Light Gray"
+
+    # NCS Hue
+    if h_deg < 30 or h_deg >= 330:
+        hue_desc = "Red"
+    elif h_deg < 60:
+        hue_desc = "Yellow-Red"
+    elif h_deg < 90:
+        hue_desc = "Yellow"
+    elif h_deg < 120:
+        hue_desc = "Green-Yellow"
+    elif h_deg < 150:
+        hue_desc = "Green"
+    elif h_deg < 180:
+        hue_desc = "Cyan-Green"
+    elif h_deg < 210:
+        hue_desc = "Cyan"
+    elif h_deg < 240:
+        hue_desc = "Blue-Cyan"
+    elif h_deg < 270:
+        hue_desc = "Blue"
+    elif h_deg < 300:
+        hue_desc = "Red-Blue"
+    else:
+        hue_desc = "Red"
+
+    whiteness = int((1 - max_val) * 100)
+    blackness = int((1 - l) * 100)
+    return f"NCS S {whiteness:02d}{blackness:02d} {hue_desc}"
+
+
+def get_pantone_name(rgb):
+    """Pantone mapping removed — return placeholder."""
+    return "Pantone N/A"
+
+
 def get_color_name(rgb):
     """Find the nearest HTML/CSS color name using CIEDE2000 distance."""
     target_lab = rgb_to_lab(rgb)
@@ -277,11 +346,17 @@ def objective_function(flat_colors, n_colors):
     """Objective to maximize: minimum pairwise distance (negated for minimization)."""
     colors = flat_colors.reshape(n_colors, 3)
     
-    # Check WCAG compliance
+    # Check WCAG compliance and apply a smooth penalty instead of hard cutoff.
     white_bg = np.array([255, 255, 255])
+    deficit_sum = 0.0
     for color in colors:
-        if not meets_wcag_aa_large(color, white_bg):
-            return 1e6  # Large penalty for non-compliant colors
+        ratio = contrast_ratio(color, white_bg)
+        if ratio < 7.0:
+            deficit_sum += (7.0 - ratio)
+    if deficit_sum > 0:
+        # Large but finite penalty that scales with total contrast deficit
+        # (keeps optimizer exploring instead of immediate rejection).
+        return 1e5 + 1e4 * deficit_sum
     
     # Calculate minimum pairwise distance between colors
     min_pairwise_dist = calculate_min_pairwise_distance(colors)
@@ -320,16 +395,47 @@ def generate_optimal_palette(n_colors=6, n_iterations=100):
     # Define bounds for RGB values
     bounds = [(0, 255)] * (n_colors * 3)
     
+    # Per-generation callback to log progress
+    iteration_count = [0]
+    def callback(xk, convergence):
+        iteration_count[0] += 1
+        obj_value = objective_function(xk, n_colors)
+        min_dist = -obj_value if obj_value < 1e5 else 0.0
+        print(f"Iteration {iteration_count[0]:3d}: Min Distance = {min_dist:6.2f}, Convergence = {convergence:.6f}")
+        return False
+
+    # Seed the initial population with WCAG-compliant candidates to avoid
+    # large early penalties. Build x0 of shape (npop, ndim).
+    ndim = n_colors * 3
+    popsize = 7
+    npop = popsize * ndim
+
+    # Ensure there are enough candidate samples
+    candidates = generate_candidate_colors(n_samples=max(5000, npop * 2))
+    if len(candidates) < n_colors:
+        raise ValueError("Not enough WCAG-compliant colors found to seed population!")
+
+    x0 = []
+    for i in range(npop):
+        idx = np.random.choice(len(candidates), size=n_colors, replace=True)
+        individual = candidates[idx].flatten()
+        jitter = np.random.normal(scale=1.0, size=individual.shape)
+        x0.append(np.clip(individual + jitter, 0, 255))
+    x0 = np.array(x0)
+
     # Run optimization
     result = differential_evolution(
         lambda x: objective_function(x, n_colors),
         bounds,
         maxiter=n_iterations,
+        popsize=popsize,
         seed=42,
         workers=1,
-        x0=initial_colors.flatten(),
+        init=x0,
         atol=0.01,
-        tol=0.01
+        tol=0.01,
+        callback=callback,
+        updating='immediate'
     )
     
     # Extract optimized colors
