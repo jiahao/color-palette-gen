@@ -257,46 +257,51 @@ with col1:
 
         # Display color swatches as native HTML (full detail)
         st.subheader("Generated Color Palette (Native View)")
-        cols = st.columns(len(palette_colors))
-        for col_idx, (col, color) in enumerate(zip(cols, palette_colors)):
-            with col:
-                hex_code = f"#{int(color[0]):02X}{int(color[1]):02X}{int(color[2]):02X}"
-                contrast = contrast_ratio(color, background_color)
-                names = get_all_names(color)
-                iscc_name = names.get('ISCC-NBS')
-                ncs_name = names.get('NCS')
-                pantone_name = names.get('Pantone')
-                ral_name = names.get('RAL Classic')
-                text_color = 'white' if calculate_luminance(color) < 0.5 else '#333333'
-                swatch_html = f"""
-                <div style="
-                    background-color: {hex_code};
-                    border: 2px solid #333;
-                    border-radius: 8px;
-                    padding: 12px;
-                    text-align: center;
-                    color: {text_color};
-                    font-family: monospace;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-                    min-height: 280px;
-                    display: flex;
-                    flex-direction: column;
-                    justify-content: space-between;
-                ">
-                    <div>
-                        <div style="font-size: 11px; font-weight: bold; margin-bottom: 4px; font-style: italic; font-family: sans-serif;">{iscc_name}</div>
-                        <div style="font-size: 9px; margin-bottom: 2px; font-style: italic; font-family: sans-serif;">{ncs_name}</div>
-                        <div style="font-size: 9px; margin-bottom: 8px; font-style: italic; font-family: sans-serif;">{pantone_name.replace('Pantone ', '')}</div>
-                        <div style="font-size: 9px; margin-bottom: 8px; font-style: italic; font-family: sans-serif;">{ral_name}</div>
+        # Limit columns per row to avoid overly crowded single-row layouts
+        max_cols_per_row = 6
+        total = len(palette_colors)
+        for start in range(0, total, max_cols_per_row):
+            block = palette_colors[start:start + max_cols_per_row]
+            cols = st.columns(len(block))
+            for col_idx, (col, color) in enumerate(zip(cols, block)):
+                with col:
+                    hex_code = f"#{int(color[0]):02X}{int(color[1]):02X}{int(color[2]):02X}"
+                    contrast = contrast_ratio(color, background_color)
+                    names = get_all_names(color)
+                    iscc_name = names.get('ISCC-NBS')
+                    ncs_name = names.get('NCS')
+                    pantone_name = names.get('Pantone')
+                    ral_name = names.get('RAL Classic')
+                    text_color = 'white' if calculate_luminance(color) < 0.5 else '#333333'
+                    swatch_html = f"""
+                    <div style="
+                        background-color: {hex_code};
+                        border: 2px solid #333;
+                        border-radius: 8px;
+                        padding: 12px;
+                        text-align: center;
+                        color: {text_color};
+                        font-family: monospace;
+                        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                        min-height: 220px;
+                        display: flex;
+                        flex-direction: column;
+                        justify-content: space-between;
+                    ">
+                        <div>
+                            <div style="font-size: 11px; font-weight: bold; margin-bottom: 4px; font-style: italic; font-family: sans-serif;">{iscc_name}</div>
+                            <div style="font-size: 9px; margin-bottom: 2px; font-style: italic; font-family: sans-serif;">{ncs_name}</div>
+                            <div style="font-size: 9px; margin-bottom: 8px; font-style: italic; font-family: sans-serif;">{pantone_name.replace('Pantone ', '')}</div>
+                            <div style="font-size: 9px; margin-bottom: 8px; font-style: italic; font-family: sans-serif;">{ral_name}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">{hex_code}</div>
+                            <div style="font-size: 9px; margin-bottom: 4px;">RGB({int(color[0])}, {int(color[1])}, {int(color[2])})</div>
+                            <div style="font-size: 10px; font-weight: bold;">CR: {contrast:.2f}:1</div>
+                        </div>
                     </div>
-                    <div>
-                        <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">{hex_code}</div>
-                        <div style="font-size: 9px; margin-bottom: 4px;">RGB({int(color[0])}, {int(color[1])}, {int(color[2])})</div>
-                        <div style="font-size: 10px; font-weight: bold;">CR: {contrast:.2f}:1</div>
-                    </div>
-                </div>
-                """
-                st.markdown(swatch_html, unsafe_allow_html=True)
+                    """
+                    st.markdown(swatch_html, unsafe_allow_html=True)
 
         # Color statistics table
         st.subheader("Color Details")
