@@ -4,6 +4,11 @@ Generate WCAG-compliant color palettes with maximal CIEDE2000 distance.
 """
 
 import numpy as np
+import matplotlib
+try:
+    matplotlib.use('Agg')
+except Exception:
+    pass
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from scipy.optimize import differential_evolution
@@ -61,6 +66,63 @@ def rgb_to_lab(rgb):
     """Convert RGB (0-255) to LAB color space."""
     xyz = rgb_to_xyz(rgb)
     return xyz_to_lab(xyz)
+
+
+def lab_to_xyz(lab):
+    """Convert LAB to XYZ color space."""
+    # D65 reference white
+    ref_x, ref_y, ref_z = 95.047, 100.000, 108.883
+
+    L, a, b = lab
+    fy = (L + 16.0) / 116.0
+    fx = a / 500.0 + fy
+    fz = fy - b / 200.0
+
+    def f_inv(t):
+        delta = 6.0 / 29.0
+        if t > delta:
+            return t**3
+        else:
+            return 3 * delta**2 * (t - 4.0/29.0)
+
+    x = ref_x * f_inv(fx)
+    y = ref_y * f_inv(fy)
+    z = ref_z * f_inv(fz)
+
+    return np.array([x, y, z])
+
+
+def xyz_to_rgb(xyz):
+    """Convert XYZ (scaled to 0..100) to RGB (0-255)."""
+    x, y, z = xyz / 100.0
+
+    # Linear RGB
+    r_lin = x *  3.2404542 + y * -1.5371385 + z * -0.4985314
+    g_lin = x * -0.9692660 + y *  1.8760108 + z *  0.0415560
+    b_lin = x *  0.0556434 + y * -0.2040259 + z *  1.0572252
+
+    def gamma_correct(c):
+        # avoid negative values before gamma
+        c = max(0.0, c)
+        if c <= 0.0031308:
+            return 12.92 * c
+        else:
+            return 1.055 * (c ** (1.0 / 2.4)) - 0.055
+
+    r = gamma_correct(r_lin)
+    g = gamma_correct(g_lin)
+    b = gamma_correct(b_lin)
+
+    rgb = np.array([r, g, b])
+    rgb = np.clip(rgb, 0.0, 1.0)
+    rgb255 = (rgb * 255.0).round()
+    return rgb255.astype(int)
+
+
+def lab_to_rgb(lab):
+    """Convert LAB to RGB (0-255)."""
+    xyz = lab_to_xyz(lab)
+    return xyz_to_rgb(xyz)
 
 
 def delta_e_cie2000(lab1, lab2):
@@ -450,7 +512,7 @@ def objective_function(flat_colors, n_colors):
     return -combined_score  # Negative because we minimize
 
 
-def generate_optimal_palette(n_colors=6, n_iterations=100):
+def generate_optimal_palette(n_colors=6, n_iterations=100, optimizer='de', refine=False, callback=None, stop_event=None):
     """Generate color palette with maximal CIEDE2000 distance."""
     print(f"Generating {n_colors} WCAG-compliant colors with maximal CIEDE2000 distance...")
     print("This may take a minute...\n")
@@ -468,13 +530,25 @@ def generate_optimal_palette(n_colors=6, n_iterations=100):
     # Define bounds for RGB values
     bounds = [(0, 255)] * (n_colors * 3)
     
-    # Per-generation callback to log progress
+    # Per-generation callback to log progress and call user callback if provided
     iteration_count = [0]
-    def callback(xk, convergence):
+    def _call_user_callback(rgb_array, meta=None):
+        try:
+            if callback is not None:
+                callback(np.array(rgb_array).astype(int), meta or {})
+        except Exception:
+            # Do not let UI callback failures stop optimization
+            pass
+
+    def de_callback(xk, convergence):
         iteration_count[0] += 1
         obj_value = objective_function(xk, n_colors)
         min_dist = -obj_value if obj_value < 1e5 else 0.0
         print(f"Iteration {iteration_count[0]:3d}: Min Distance = {min_dist:6.2f}, Convergence = {convergence:.6f}")
+        current_rgb = np.array(xk).reshape(n_colors, 3)
+        _call_user_callback(current_rgb, {'gen': iteration_count[0], 'optimizer': 'de', 'min_dist': min_dist})
+        if stop_event is not None and getattr(stop_event, 'is_set', lambda: False)():
+            return True
         return False
 
     # Seed the initial population with WCAG-compliant candidates to avoid
@@ -496,26 +570,229 @@ def generate_optimal_palette(n_colors=6, n_iterations=100):
         x0.append(np.clip(individual + jitter, 0, 255))
     x0 = np.array(x0)
 
-    # Run optimization
-    result = differential_evolution(
-        lambda x: objective_function(x, n_colors),
-        bounds,
-        maxiter=n_iterations,
-        popsize=popsize,
-        seed=42,
-        workers=1,
-        init=x0,
-        atol=0.01,
-        tol=0.01,
-        callback=callback,
-        updating='immediate'
-    )
-    
-    # Extract optimized colors
-    colors = result.x.reshape(n_colors, 3).astype(int)
-    colors = np.clip(colors, 0, 255)
-    
-    return colors
+    if optimizer == 'de':
+        result = differential_evolution(
+            lambda x: objective_function(x, n_colors),
+            bounds,
+            maxiter=n_iterations,
+            popsize=popsize,
+            seed=42,
+            workers=1,
+            init=x0,
+            atol=0.01,
+            tol=0.01,
+            callback=de_callback,
+            updating='immediate'
+        )
+        optimized = result.x
+
+    elif optimizer == 'basinhopping':
+        from scipy.optimize import basinhopping, minimize
+
+        x0_guess = x0[0]
+
+        minimizer_kwargs = {
+            'method': 'L-BFGS-B',
+            'bounds': bounds,
+            'options': {'maxiter': 200}
+        }
+
+        def bh_callback(x, f, accepted):
+            iteration_count[0] += 1
+            min_dist = -f if f < 1e5 else 0.0
+            print(f"BH-Iter {iteration_count[0]:3d}: Min Distance = {min_dist:6.2f}, Accepted={accepted}")
+            current_rgb = np.array(x).reshape(n_colors, 3)
+            _call_user_callback(current_rgb, {'gen': iteration_count[0], 'optimizer': 'basinhopping', 'min_dist': min_dist})
+            if stop_event is not None and getattr(stop_event, 'is_set', lambda: False)():
+                return True
+            return False
+
+        bh_result = basinhopping(
+            lambda x: objective_function(x, n_colors),
+            x0_guess,
+            niter=n_iterations,
+            minimizer_kwargs=minimizer_kwargs,
+            callback=bh_callback,
+            disp=False
+        )
+
+        optimized = bh_result.x
+
+    elif optimizer == 'cma':
+        try:
+            import cma
+            # Tune CMA-ES to operate in perceptual Lab space.
+            # Build an initial mean in Lab-space from the seeded RGB population
+            pop_lab = []
+            for ind in x0:
+                rgb_ind = np.array(ind).reshape(n_colors, 3)
+                lab_vec = np.concatenate([rgb_to_lab(rgb_ind[i]) for i in range(n_colors)])
+                pop_lab.append(lab_vec)
+            pop_lab = np.array(pop_lab)
+            lab_mean = np.mean(pop_lab, axis=0)
+
+            # Lab bounds per component: L: [0,100], a/b: [-128,127]
+            lower = []
+            upper = []
+            for _ in range(n_colors):
+                lower.extend([0.0, -128.0, -128.0])
+                upper.extend([100.0, 127.0, 127.0])
+
+            sigma0 = 8.0
+            opts = {'bounds': [lower, upper], 'verb_disp': 0}
+
+            es = cma.CMAEvolutionStrategy(list(lab_mean), sigma0, opts)
+
+            for gen in range(n_iterations):
+                candidate_labs = es.ask()
+                fitnesses = []
+                rgbs_for_candidates = []
+                for cand_lab in candidate_labs:
+                    # enforce box constraints and convert to RGB for objective
+                    cand_lab = np.clip(cand_lab, np.array(lower), np.array(upper))
+                    lab_colors = np.array(cand_lab).reshape(n_colors, 3)
+                    # convert each lab to rgb (0-255)
+                    rgb_colors = np.vstack([lab_to_rgb(lab_colors[i]) for i in range(n_colors)])
+                    rgb_flat = rgb_colors.flatten()
+                    rgbs_for_candidates.append(rgb_flat)
+                    fitnesses.append(objective_function(rgb_flat, n_colors))
+
+                es.tell(candidate_labs, fitnesses)
+                iteration_count[0] += 1
+                best_idx = int(np.argmin(fitnesses))
+                best_val = fitnesses[best_idx]
+                min_dist = -best_val if best_val < 1e5 else 0.0
+                best_rgb = np.array(rgbs_for_candidates[best_idx]).reshape(n_colors, 3)
+                print(f"CMA-Gen {iteration_count[0]:3d}: Min Distance = {min_dist:6.2f}")
+                _call_user_callback(best_rgb, {'gen': iteration_count[0], 'optimizer': 'cma', 'min_dist': min_dist})
+                if stop_event is not None and getattr(stop_event, 'is_set', lambda: False)():
+                    es.stop()
+                    break
+
+            # best found lab -> convert back to RGB
+            best_lab = np.array(es.result.xbest)
+            best_lab = np.clip(best_lab, np.array(lower), np.array(upper))
+            best_lab_colors = best_lab.reshape(n_colors, 3)
+            rgb_colors = np.vstack([lab_to_rgb(best_lab_colors[i]) for i in range(n_colors)])
+            optimized = rgb_colors.flatten()
+        except Exception as e:
+            print("CMA-ES unavailable or failed, falling back to DE:", e)
+            result = differential_evolution(
+                lambda x: objective_function(x, n_colors),
+                bounds,
+                maxiter=n_iterations,
+                popsize=popsize,
+                seed=42,
+                workers=1,
+                init=x0,
+                atol=0.01,
+                tol=0.01,
+                callback=callback,
+                updating='immediate'
+            )
+            optimized = result.x
+
+    elif optimizer == 'greedy':
+        # Greedy farthest-point sampling from a large candidate pool (deterministic-ish)
+        n_samples = max(5000, n_colors * 2000)
+        candidates = generate_candidate_colors(n_samples=n_samples)
+        if len(candidates) < n_colors:
+            raise ValueError("Not enough WCAG-compliant colors found for greedy selection")
+
+        lab_candidates = [rgb_to_lab(c) for c in candidates]
+
+        # start with a random seed
+        idx0 = np.random.choice(len(candidates))
+        selected_idx = [idx0]
+        selected = [candidates[idx0]]
+        selected_lab = [lab_candidates[idx0]]
+
+        for k in range(1, n_colors):
+            best_candidate = None
+            best_min_dist = -1
+            best_idx = None
+            for i, lab in enumerate(lab_candidates):
+                if i in selected_idx:
+                    continue
+                # compute min distance to already selected
+                min_d = min(delta_e_cie2000(lab, s) for s in selected_lab)
+                if min_d > best_min_dist:
+                    best_min_dist = min_d
+                    best_candidate = candidates[i]
+                    best_idx = i
+
+            if best_candidate is None:
+                break
+            selected_idx.append(best_idx)
+            selected.append(best_candidate)
+            selected_lab.append(lab_candidates[best_idx])
+
+        optimized = np.array(selected)
+        # Optional refinement: run CMA-ES starting from greedy selection
+        if refine:
+            try:
+                import cma
+                print('Refining greedy selection with CMA-ES...')
+                x0_mean = optimized.flatten().astype(float)
+                sigma0 = 15.0
+                opts = {'bounds': [0, 255], 'verb_disp': 0}
+                es = cma.CMAEvolutionStrategy(list(x0_mean), sigma0, opts)
+                for gen in range(min(n_iterations, 60)):
+                    pop = es.ask()
+                    fitnesses = [objective_function(np.array(p), n_colors) for p in pop]
+                    es.tell(pop, fitnesses)
+                    iteration_count[0] += 1
+                    best_idx = int(np.argmin(fitnesses))
+                    best_val = fitnesses[best_idx]
+                    min_dist = -best_val if best_val < 1e5 else 0.0
+                    print(f"Refine-Gen {iteration_count[0]:3d}: Min Distance = {min_dist:6.2f}")
+                    if es.stop():
+                        break
+                refined = np.array(es.result.xbest).reshape(n_colors, 3)
+                optimized = np.clip(refined, 0, 255)
+            except Exception as e:
+                print('CMA-ES refine unavailable, skipping refine:', e)
+
+    elif optimizer == 'local':
+        # Local constrained optimization (SLSQP) starting from a feasible seed.
+        from scipy.optimize import minimize
+
+        # pick a feasible individual from x0 (first one should be feasible-ish)
+        x0_guess = x0[0]
+
+        # Define inequality constraints: contrast_ratio(color, white) - 7.0 >= 0
+        white_bg = np.array([255, 255, 255])
+        cons = []
+        for i in range(n_colors):
+            def make_con(i):
+                return {
+                    'type': 'ineq',
+                    'fun': lambda x, i=i: contrast_ratio(x.reshape(n_colors, 3)[i], white_bg) - 7.0
+                }
+            cons.append(make_con(i))
+
+        # Run SLSQP with box bounds and the WCAG constraints
+        res = minimize(
+            lambda x: objective_function(x, n_colors),
+            x0_guess,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            options={'maxiter': max(100, n_iterations * 10), 'ftol': 1e-6, 'disp': False}
+        )
+
+        if not res.success:
+            print('Local optimization did not converge:', res.message)
+
+        optimized = res.x
+
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer}")
+
+    optimized = np.array(optimized).reshape(n_colors, 3).astype(int)
+    optimized = np.clip(optimized, 0, 255)
+
+    return optimized
 
 
 def visualize_palette(colors):
@@ -675,7 +952,11 @@ def visualize_palette(colors):
     
     plt.savefig('/tmp/color_palette.png', dpi=150, bbox_inches='tight')
     print(f"\nVisualization saved to: /tmp/color_palette.png")
-    plt.show()
+    # Do not call interactive show in headless environments (FigureCanvasAgg)
+    try:
+        plt.close(fig)
+    except Exception:
+        pass
 
 
 def main():
