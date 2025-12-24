@@ -477,6 +477,59 @@ def calculate_min_pairwise_distance(colors):
     return min_dist
 
 
+def simulate_cvd_protanopia(rgb):
+    """Simple protanopia (red-weak) simulation — lightweight approximation.
+
+    Operates on 0-255 RGB and returns simulated RGB (0-255).
+    This is an approximation intended for penalty heuristics (not a perfect
+    color-vision simulation model).
+    """
+    r, g, b = (rgb / 255.0)
+    # Reduce red channel sensitivity and shift into green/blue mix
+    r_s = 0.0 * r + 0.7 * g + 0.3 * b
+    g_s = 0.0 * r + 1.0 * g + 0.0 * b
+    b_s = 0.0 * r + 0.0 * g + 1.0 * b
+    sim = np.clip(np.array([r_s, g_s, b_s]) * 255.0, 0, 255)
+    return sim.astype(int)
+
+
+def simulate_cvd_deuteranopia(rgb):
+    """Simple deuteranopia (green-weak) simulation — lightweight approximation."""
+    r, g, b = (rgb / 255.0)
+    # Reduce green channel sensitivity and shift into red/blue mix
+    r_s = 1.0 * r + 0.0 * g + 0.0 * b
+    g_s = 0.7 * r + 0.0 * g + 0.3 * b
+    b_s = 0.0 * r + 0.0 * g + 1.0 * b
+    sim = np.clip(np.array([r_s, g_s, b_s]) * 255.0, 0, 255)
+    return sim.astype(int)
+
+
+def simulate_cvd_tritanopia(rgb):
+    """Simple tritanopia (blue-weak) simulation — lightweight approximation."""
+    r, g, b = (rgb / 255.0)
+    # Reduce blue channel sensitivity and shift into red/green mix
+    r_s = 1.0 * r + 0.0 * g + 0.0 * b
+    g_s = 0.0 * r + 1.0 * g + 0.0 * b
+    b_s = 0.3 * r + 0.7 * g + 0.0 * b
+    sim = np.clip(np.array([r_s, g_s, b_s]) * 255.0, 0, 255)
+    return sim.astype(int)
+
+
+def simulate_cvd(rgb, deficiency):
+    """Dispatch to a simple CVD simulator.
+
+    deficiency: one of 'protanopia','deuteranopia','tritanopia'
+    """
+    if deficiency == 'protanopia':
+        return simulate_cvd_protanopia(rgb)
+    if deficiency == 'deuteranopia':
+        return simulate_cvd_deuteranopia(rgb)
+    if deficiency == 'tritanopia':
+        return simulate_cvd_tritanopia(rgb)
+    # Unknown -> return original
+    return np.array(rgb).astype(int)
+
+
 def objective_function(flat_colors, n_colors):
     """Objective to maximize: minimum pairwise distance (negated for minimization)."""
     colors = flat_colors.reshape(n_colors, 3)
@@ -508,7 +561,35 @@ def objective_function(flat_colors, n_colors):
     # Combine objectives: prioritize pairwise distance, but also consider black distance
     # Weight pairwise distance more heavily
     combined_score = 0.8 * min_pairwise_dist + 0.2 * min_black_dist
-    
+
+    # --- Color Vision Deficiency (CVD) penalty ---
+    # Penalize palettes that become hard to distinguish under common CVDs.
+    # We simulate a few common deficiencies and compute the minimum simulated
+    # pairwise ΔE; if it's below `cvd_threshold` we subtract a penalty from the
+    # combined score so the optimizer prefers palettes that remain separable.
+    cvd_threshold = 10.0  # ΔE below this is likely hard to distinguish
+    cvd_weight = 0.75     # scales the penalty magnitude
+
+    cvd_penalty = 0.0
+    for deficiency in ('protanopia', 'deuteranopia', 'tritanopia'):
+        try:
+            simulated = np.vstack([simulate_cvd(c, deficiency) for c in colors])
+            # compute min pairwise ΔE in simulated space
+            lab_sim = [rgb_to_lab(s) for s in simulated]
+            min_sim = float('inf')
+            for i, j in itertools.combinations(range(len(lab_sim)), 2):
+                d = delta_e_cie2000(lab_sim[i], lab_sim[j])
+                if d < min_sim:
+                    min_sim = d
+            if min_sim < cvd_threshold:
+                cvd_penalty += (cvd_threshold - min_sim)
+        except Exception:
+            # If simulation fails for any reason, skip that deficiency
+            pass
+
+    # scale the penalty into the same units as combined_score
+    combined_score = combined_score - cvd_weight * cvd_penalty
+
     return -combined_score  # Negative because we minimize
 
 
